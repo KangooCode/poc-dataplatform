@@ -1,0 +1,28 @@
+# .dockerignore
+
+# Git and version control
+.git
+.gitignore
+
+# Python specific
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+*.egg-info/
+
+# IDE and editor config
+.vscode/
+.idea/
+
+# Environment files
+.env
+.env.*
+
+# Build and test artifacts
+build/
+dist/
+*.log
+.pytest_cache/
+htmlcov/
