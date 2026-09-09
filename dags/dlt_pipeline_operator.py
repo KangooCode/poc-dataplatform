@@ -104,7 +104,9 @@ class DltPipelineOperator(KubernetesPodOperator):
                 f"pipeline_config_json invalide, le pod ne sera pas lance : {exc}"
             ) from exc
 
-        self.env_vars = {"PIPELINE_CONFIG": json.dumps(payload)}
+        self.env_vars = [
+            k8s.V1EnvVar(name="PIPELINE_CONFIG", value=json.dumps(payload))
+        ]
         self.secrets = _secrets_for_config(config)
 
         return super().execute(context)

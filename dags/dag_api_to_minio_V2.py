@@ -8,7 +8,7 @@ from airflow.models.param import Param
 
 from dlt_pipeline_operator import DltPipelineOperator
 
-DAG_ID = "rest_api_to_minio"
+DAG_ID = "rest_api_to_minio_v2"
 
 DEFAULT_CONFIG = {
     "pipeline_name": "rest_api_to_minio",
@@ -46,7 +46,8 @@ with DAG(
             type="string",
             title="Configuration du pipeline (JSON)",
             description="Schema complet : voir scripts/pipeline_config.py (DltPipelineConfig). "
-            "Doit correspondre au pattern implemente par scripts/rest_api_to_minio.py.",
+            "Doit correspondre au pattern implemente par scripts/api_to_minio.py "
+            "(source 'rest_api' -> destination 'filesystem_s3').",
         ),
     },
 ) as dag:

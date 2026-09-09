@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import logging
-import os
+import sys
 
 import dlt
 from dlt.sources.helpers.requests import Client as DltHttpClient
 from dlt.sources.helpers.requests import Session as DltSession
 from dlt.sources.rest_api import rest_api_source
+
+from _common import load_config, setup_logging
+from pipeline_config import (
+    DltPipelineConfig,
+    FilesystemS3DestinationConfig,
+    RestApiSourceConfig,
+    get_s3_credentials,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -22,42 +30,8 @@ DEFAULT_HTTP_MAX_RETRY_DELAY = 60.0
 
 DEFAULT_MAX_TABLE_NESTING = 2
 DEFAULT_LAYOUT = "{table_name}"
-
-MINIO_ENDPOINT_ENV = "MINIO_ENDPOINT"
-MINIO_ACCESS_KEY_ENV = "MINIO_ACCESS_KEY"
-MINIO_SECRET_KEY_ENV = "MINIO_SECRET_KEY"
-
-
-# ---------------------------------------------------------------------------
-# MinIO credentials
-# ---------------------------------------------------------------------------
-
-def _get_minio_credentials() -> dict[str, str]:
-    endpoint = os.getenv(MINIO_ENDPOINT_ENV)
-    access_key = os.getenv(MINIO_ACCESS_KEY_ENV)
-    secret_key = os.getenv(MINIO_SECRET_KEY_ENV)
-
-    missing = [
-        env_name
-        for env_name, value in (
-            (MINIO_ENDPOINT_ENV, endpoint),
-            (MINIO_ACCESS_KEY_ENV, access_key),
-            (MINIO_SECRET_KEY_ENV, secret_key),
-        )
-        if not value
-    ]
-
-    if missing:
-        raise ValueError(
-            "Missing required MinIO environment variables: "
-            + ", ".join(missing)
-        )
-
-    return {
-        "aws_access_key_id": access_key,
-        "aws_secret_access_key": secret_key,
-        "endpoint_url": endpoint,
-    }
+DEFAULT_FILE_FORMAT = "parquet"
+DEFAULT_CREDENTIALS_ENV_PREFIX = "MINIO"
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +110,7 @@ def _build_minio_destination(
     *,
     bucket_name: str,
     layout: str,
+    credentials_env_prefix: str = DEFAULT_CREDENTIALS_ENV_PREFIX,
 ):
     if not bucket_name:
         raise ValueError("bucket_name must not be empty")
@@ -143,12 +118,11 @@ def _build_minio_destination(
     if not layout:
         raise ValueError("layout must not be empty")
 
-    credentials = _get_minio_credentials()
+    credentials = get_s3_credentials(credentials_env_prefix)
 
     return dlt.destinations.filesystem(
         bucket_url=f"s3://{bucket_name}",
         layout=layout,
-        file_format="parquet",
         credentials=credentials,
     )
 
@@ -229,6 +203,8 @@ def run_rest_api_to_minio_pipeline(
     retry_backoff: float = DEFAULT_HTTP_BACKOFF_FACTOR,
     retry_max_delay: float = DEFAULT_HTTP_MAX_RETRY_DELAY,
     max_table_nesting: int = DEFAULT_MAX_TABLE_NESTING,
+    file_format: str = DEFAULT_FILE_FORMAT,
+    credentials_env_prefix: str = DEFAULT_CREDENTIALS_ENV_PREFIX,
 ):
 
     if not resources:
@@ -270,6 +246,7 @@ def run_rest_api_to_minio_pipeline(
     destination = _build_minio_destination(
         bucket_name=bucket_name,
         layout=layout,
+        credentials_env_prefix=credentials_env_prefix,
     )
 
     pipeline = dlt.pipeline(
@@ -279,7 +256,7 @@ def run_rest_api_to_minio_pipeline(
     )
 
     try:
-        result = pipeline.run(source)
+        result = pipeline.run(source, loader_file_format=file_format)
 
     except Exception:
         logger.exception(
@@ -307,3 +284,55 @@ def run_rest_api_to_minio_pipeline(
     )
 
     return result
+
+
+def run_from_config(config: DltPipelineConfig):
+
+    source = config.source
+    destination = config.destination
+
+    if not isinstance(source, RestApiSourceConfig):
+        raise ValueError(
+            f"api_to_minio.py only handles the 'rest_api' source, got "
+            f"'{source.kind}'. Use a script dedicated to that pattern."
+        )
+
+    if not isinstance(destination, FilesystemS3DestinationConfig):
+        raise ValueError(
+            f"api_to_minio.py only handles the 'filesystem_s3' destination, got "
+            f"'{destination.kind}'. Use a script dedicated to that pattern."
+        )
+
+    if config.load_mode == "incremental":
+        logger.warning(
+            "load_mode='incremental' is not implemented, falling back to a full "
+            "load | pipeline=%s",
+            config.pipeline_name,
+        )
+
+    return run_rest_api_to_minio_pipeline(
+        bucket_name=destination.bucket_name,
+        dataset_name=config.dataset_name,
+        pipeline_name=config.pipeline_name,
+        base_url=source.base_url,
+        resources=source.resources,
+        load_mode=config.load_mode,
+        default_params=source.default_params,
+        layout=destination.layout,
+        retry_attempts=source.retry_attempts,
+        retry_backoff=source.retry_backoff,
+        retry_max_delay=source.retry_max_delay,
+        max_table_nesting=config.max_table_nesting,
+        file_format=destination.file_format,
+        credentials_env_prefix=destination.credentials_env_prefix,
+    )
+
+
+def main() -> int:
+    setup_logging()
+    run_from_config(load_config())
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

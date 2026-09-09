@@ -1,5 +1,6 @@
 faker
-dlt[postgres, filesystem, s3]
+dlt[postgres, filesystem, s3, parquet]
+pydantic
 psycopg2-binary
 sqlalchemy
 apache-airflow-providers-oracle

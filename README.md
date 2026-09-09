@@ -44,6 +44,7 @@ Deux générations d'implémentation coexistent dans le dépôt :
 | | **V1** | **V2** (cible) |
 |---|---|---|
 | DAG | [dags/dag_api_to_minio.py](dags/dag_api_to_minio.py) | [dags/dag_api_to_minio_V2.py](dags/dag_api_to_minio_V2.py) |
+| `dag_id` | `rest_api_to_minio` | `rest_api_to_minio_v2` |
 | Opérateur | `KubernetesPodOperator` brut | [`DltPipelineOperator`](dags/dlt_pipeline_operator.py) |
 | Configuration | ~12 params Airflow → ~12 variables `PIPELINE_*` | 1 seul JSON → `PIPELINE_CONFIG` |
 | Validation | aucune (échec dans le pod) | Pydantic dans le scheduler, **avant** de lancer le pod |
@@ -65,7 +66,8 @@ dags/
   dlt_pipeline_operator.py  Opérateur réutilisable : valide la config, mappe les
                             secrets, lance le pod
 scripts/
-  api_to_minio.py           Logique dlt : source REST API -> destination filesystem/S3
+  api_to_minio.py           Logique dlt (REST API -> S3/MinIO) + entrypoint V2 :
+                            lit PIPELINE_CONFIG et lance le pipeline
   pipeline_config.py        Schémas Pydantic (sources, destinations) + helpers credentials
   _common.py                setup_logging() + load_config() partagés par les scripts
 entrypoint.py               Entrypoint de la V1 (lit les variables PIPELINE_*)
@@ -162,8 +164,12 @@ vers `s3://airflow-logs/` via la connexion `aws_default` (secret `airflow-s3-con
 
 ### 5. Lancer un pipeline
 
-Ouvrez l'UI Airflow, dépausez `rest_api_to_minio`, puis **Trigger DAG w/ config** et
-ajustez le JSON `pipeline_config` (V2) ou les paramètres individuels (V1).
+Ouvrez l'UI Airflow, dépausez le DAG voulu (`rest_api_to_minio_v2` pour la V2,
+`rest_api_to_minio` pour la V1), puis **Trigger DAG w/ config** et ajustez le JSON
+`pipeline_config` (V2) ou les paramètres individuels (V1).
+
+Le tag d'image par défaut des DAGs est `latest` : renseignez le paramètre `image_tag`
+avec le tag réellement poussé (`1.0.2` ci-dessus) ou taguez aussi l'image en `latest`.
 
 ---
 
@@ -260,20 +266,19 @@ Côté Compose, `.env` fournit `AIRFLOW_UID`, `AIRFLOW_GID`, les identifiants de
 
 Points à connaître avant de reprendre le projet :
 
-- **Les deux DAGs déclarent le même `dag_id`** (`rest_api_to_minio`, dans
-  [dag_api_to_minio.py:12](dags/dag_api_to_minio.py:12) et
-  [dag_api_to_minio_V2.py:11](dags/dag_api_to_minio_V2.py:11)). Un seul des deux sera
-  chargé par Airflow. Renommer la V2 ou supprimer la V1 avant utilisation.
-- **Le chemin V2 n'est pas encore exécutable de bout en bout** : l'opérateur lance
-  `python /opt/airflow/scripts/api_to_minio.py`, mais
-  [scripts/api_to_minio.py](scripts/api_to_minio.py) n'expose que des fonctions — pas de
-  bloc `if __name__ == "__main__"` ni d'appel à `load_config()`. Le helper
-  [scripts/_common.py](scripts/_common.py) n'est référencé par aucun script.
-- **Toutes les destinations ne sont pas implémentées** : `pipeline_config.py` décrit
-  `filesystem_azure` et `postgres`, mais seul le couple `rest_api` → `filesystem_s3` est
-  codé dans `api_to_minio.py`.
-- **`load_mode: "incremental"`** est accepté par le schéma mais n'a pas d'effet sur le
-  pipeline : il est seulement journalisé.
+- **Le layout par défaut ne produit pas d'extension de fichier.** `{table_name}` ne
+  contient aucun des placeholders `{load_id}` / `{file_id}` / `{ext}` : dlt écrit donc un
+  objet nommé `<dataset>/pokemon` (sans `.parquet`), réécrit à l'identique à chaque
+  exécution. C'est cohérent avec `write_disposition: "replace"`, mais la plupart des
+  lecteurs et des tables externes s'appuient sur l'extension. Layout par défaut de dlt si
+  vous voulez l'historique et l'extension : `{table_name}/{load_id}.{file_id}.{ext}`.
+- **Toutes les combinaisons du schéma ne sont pas implémentées** : `pipeline_config.py`
+  décrit les sources `sql_database` et les destinations `filesystem_azure` / `postgres`,
+  mais seul le couple `rest_api` → `filesystem_s3` est codé dans `api_to_minio.py`. Le
+  script rejette explicitement les autres combinaisons avec un `ValueError` parlant.
+- **`load_mode: "incremental"`** est accepté par le schéma mais n'a pas d'effet : le
+  script journalise un `WARNING` et exécute un chargement complet.
 - Les tags d'image ne sont pas alignés (`values.yaml` → `1.0.2`,
-  `pod_templates/custom_pod.yaml` → `1.0.0`, DAGs → `latest` par défaut).
+  `pod_templates/custom_pod.yaml` → `1.0.0`, DAGs → `latest` par défaut). Le `docker push`
+  de la section Kubernetes pousse `1.0.0` alors que le `docker build` construit `1.0.2`.
 - Le dépôt ne contient pas de tests.
