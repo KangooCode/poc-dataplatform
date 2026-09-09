@@ -12,9 +12,10 @@ from airflow.providers.cncf.kubernetes.secret import Secret
 
 from pipeline_config import DltPipelineConfig, required_env_vars
 
-DEFAULT_IMAGE_REPOSITORY = "localhost:5000/airflow-custom"
+
+DEFAULT_IMAGE_REPOSITORY = "localhost:5000/dlt-pipeline"
 DEFAULT_NAMESPACE = "airflow"
-DEFAULT_SCRIPTS_DIR = "/opt/airflow/scripts"
+DEFAULT_SCRIPTS_DIR = "/app"
 DEFAULT_CONTAINER_RESOURCES = k8s.V1ResourceRequirements(
     requests={"cpu": "500m", "memory": "512Mi"},
     limits={"cpu": "1", "memory": "1Gi"},

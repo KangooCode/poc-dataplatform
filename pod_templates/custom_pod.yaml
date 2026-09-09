@@ -5,5 +5,5 @@ metadata:
 spec:
   containers:
     - name: base
-      image: localhost:5000/airflow-custom:1.0.0
+      image: localhost:5000/airflow-custom:1.1.0
       imagePullPolicy: IfNotPresent

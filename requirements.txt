@@ -1,8 +1,0 @@
-faker
-dlt[postgres, filesystem, s3, parquet]
-pydantic
-psycopg2-binary
-sqlalchemy
-apache-airflow-providers-oracle
-apache-airflow-providers-postgres
-apache-airflow-providers-amazon

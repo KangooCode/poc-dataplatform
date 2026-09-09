@@ -1,0 +1,2 @@
+dlt[filesystem, s3, parquet]~=1.28
+pydantic~=2.0

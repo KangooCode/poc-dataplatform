@@ -3,7 +3,11 @@ executor: "KubernetesExecutor"
 images:
   airflow:
     repository: localhost:5000/airflow-custom
-    tag: "1.0.2"
+    tag: "1.1.0"
+    pullPolicy: IfNotPresent
+  pod_template:
+    repository: localhost:5000/airflow-custom
+    tag: "1.1.0"
     pullPolicy: IfNotPresent
 
 config:

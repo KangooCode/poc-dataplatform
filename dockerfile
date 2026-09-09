@@ -1,16 +1,19 @@
-FROM apache/airflow:3.2.2
+FROM python:3.12-slim
 
-USER airflow
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app \
+    DLT_DATA_DIR=/tmp/dlt
 
-COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+WORKDIR /app
 
-COPY entrypoint.py /opt/airflow/entrypoint.py
+COPY requirements-pipeline.txt ./
+RUN pip install --no-cache-dir -r requirements-pipeline.txt
 
-COPY scripts/ /opt/airflow/scripts
+COPY scripts/ /app/
 
-COPY dags/ /opt/airflow/dags/
+RUN useradd --create-home --uid 50000 pipeline
+USER pipeline
 
-ENV PYTHONPATH=/opt/airflow/dags:/opt/airflow/scripts
-
-WORKDIR /opt/airflow
+ENTRYPOINT ["python"]
+CMD ["/app/api_to_minio.py"]

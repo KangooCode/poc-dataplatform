@@ -5,12 +5,24 @@
 .gitignore
 
 # Python specific
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
 venv/
-*.egg-info/
+.venv/
+**/*.egg-info/
+
+# Runtime local
+logs/
+config/
+.dlt/
+
+# Manifests/docs
+minio.yaml
+values.yaml
+pod_templates/
+README.md
 
 # IDE and editor config
 .vscode/

@@ -15,7 +15,6 @@ configuration et lancer un pod ; toute la logique dlt vit dans `scripts/`.
 - [Architecture](#architecture)
 - [Structure du dépôt](#structure-du-dépôt)
 - [Prérequis](#prérequis)
-- [Exécution locale (Docker Compose)](#exécution-locale-docker-compose)
 - [Exécution sur Kubernetes](#exécution-sur-kubernetes)
 - [Configuration d'un pipeline](#configuration-dun-pipeline)
 - [Secrets et variables d'environnement](#secrets-et-variables-denvironnement)
@@ -26,34 +25,39 @@ configuration et lancer un pod ; toute la logique dlt vit dans `scripts/`.
 ## Architecture
 
 ```
-Airflow (scheduler / DAG)
+Airflow (scheduler / DAG)          image localhost:5000/airflow-custom:<tag>
+      |                            construite par airflow.dockerfile
+      |                            deployee par le chart Helm (values.yaml)
       |
       |  DltPipelineOperator (hérite de KubernetesPodOperator)
       |   1. valide le JSON de config avec Pydantic
       |   2. déduit les secrets K8s nécessaires
       |   3. injecte PIPELINE_CONFIG dans l'env du pod
       v
-Pod Kubernetes dédié  (image localhost:5000/airflow-custom:<tag>)
-      |  python /opt/airflow/scripts/<script>.py
+Pod Kubernetes dédié               image localhost:5000/dlt-pipeline:<tag>
+      |  python /app/<script>.py   construite par dockerfile
       v
 Pipeline dlt  -->  Source (REST API, SQL)  -->  Destination (MinIO/S3, ADLS, Postgres)
 ```
 
-Deux générations d'implémentation coexistent dans le dépôt :
+### Deux images, deux responsabilités
 
-| | **V1** | **V2** (cible) |
+Le dépôt produit deux images qui ne partagent aucune dépendance :
+
+| | **`dockerfile`** | **`airflow.dockerfile`** |
 |---|---|---|
-| DAG | [dags/dag_api_to_minio.py](dags/dag_api_to_minio.py) | [dags/dag_api_to_minio_V2.py](dags/dag_api_to_minio_V2.py) |
-| `dag_id` | `rest_api_to_minio` | `rest_api_to_minio_v2` |
-| Opérateur | `KubernetesPodOperator` brut | [`DltPipelineOperator`](dags/dlt_pipeline_operator.py) |
-| Configuration | ~12 params Airflow → ~12 variables `PIPELINE_*` | 1 seul JSON → `PIPELINE_CONFIG` |
-| Validation | aucune (échec dans le pod) | Pydantic dans le scheduler, **avant** de lancer le pod |
-| Secrets | liste codée en dur dans le DAG | déduits de la config ([`required_env_vars`](scripts/pipeline_config.py)) |
-| Entrypoint | [entrypoint.py](entrypoint.py) | `scripts/<script>.py` directement |
+| Image | `localhost:5000/dlt-pipeline` | `localhost:5000/airflow-custom` |
+| Base | `python:3.12-slim` | `apache/airflow:3.2.2` |
+| Contenu | `scripts/` + dlt et ses dépendances | `dags/` + `scripts/` |
+| Rôle | exécuter `api_to_minio.py` dans un pod | faire tourner Airflow (scheduler, API server, workers) |
+| Déployée par | `DltPipelineOperator` | le chart Helm ([values.yaml](values.yaml)) |
 
-La V2 est la direction retenue (cf. commit `71214ef`) : ajouter un nouveau pattern
-d'ingestion revient à écrire un script dans `scripts/` et un DAG de quelques lignes,
-sans dupliquer la plomberie Kubernetes.
+L'image du pipeline ne contient **pas** Airflow, et l'image Airflow ne contient
+**pas** dlt : un pipeline qui plante n'emporte pas l'ordonnanceur, et les montées
+de version des deux mondes sont indépendantes.
+
+Ajouter un nouveau pattern d'ingestion revient à écrire un script dans `scripts/`
+et un DAG de quelques lignes, sans dupliquer la plomberie Kubernetes.
 
 ---
 
@@ -61,70 +65,55 @@ sans dupliquer la plomberie Kubernetes.
 
 ```
 dags/
-  dag_api_to_minio.py       DAG V1 : API REST -> MinIO (params à plat)
-  dag_api_to_minio_V2.py    DAG V2 : API REST -> MinIO (config JSON unique)
+  dag_api_to_minio_V2.py    DAG : API REST -> MinIO (config JSON unique)
   dlt_pipeline_operator.py  Opérateur réutilisable : valide la config, mappe les
                             secrets, lance le pod
 scripts/
-  api_to_minio.py           Logique dlt (REST API -> S3/MinIO) + entrypoint V2 :
+  api_to_minio.py           Logique dlt (REST API -> S3/MinIO) + entrypoint :
                             lit PIPELINE_CONFIG et lance le pipeline
   pipeline_config.py        Schémas Pydantic (sources, destinations) + helpers credentials
   _common.py                setup_logging() + load_config() partagés par les scripts
-entrypoint.py               Entrypoint de la V1 (lit les variables PIPELINE_*)
-dockerfile                  Image custom : airflow 3.2.2 + requirements + dags + scripts
-requirements.txt            dlt[postgres, filesystem, s3], providers Airflow, etc.
-docker-compose.yaml         Stack Airflow locale (CeleryExecutor) + 3 Postgres + Redis
+dockerfile                  Image d'exécution des pipelines (python:3.12-slim + dlt)
+requirements-pipeline.txt   Dépendances de cette image : dlt + pydantic, rien d'autre
+airflow.dockerfile          Image Airflow (apache/airflow:3.2.2 + dags + scripts)
 values.yaml                 Values Helm du chart officiel airflow (KubernetesExecutor)
 minio.yaml                  Manifests MinIO (PVC + Deployment + Service) pour le cluster
-pod_templates/              Template de pod worker pour l'executor Kubernetes
-.dlt/config.toml            Tuning dlt (workers de normalize/load, taille des fichiers)
+pod_templates/              Template de pod worker (inutilisé, voir État actuel)
+.dlt/config.toml            Tuning dlt local uniquement (non embarqué dans les images)
 ```
 
-> `config/`, `logs/`, `.env`, `.venv` et `.dlt` sont dans le [.gitignore](.gitignore) :
-> après un clone il faut les recréer (voir ci-dessous).
+> `logs/`, `config/`, `.venv` et `.dlt` sont dans le [.gitignore](.gitignore) : ce sont
+> des résidus d'exécutions locales, aucun n'est nécessaire au déploiement.
 
 ---
 
 ## Prérequis
 
-- **Docker** (mode local)
-- **Kubernetes** avec un registry local sur `localhost:5000`, **kubectl** et **Helm**
-  (mode cible — c'est le seul mode où les DAGs s'exécutent réellement, voir plus bas)
+- **Docker**, pour construire et pousser les deux images
+- **Kubernetes** avec un registry accessible sur `localhost:5000`, **kubectl** et **Helm**
 - ~4 Go de RAM disponibles pour la stack Airflow
+
+Tout passe par le cluster : les DAGs lancent des `KubernetesPodOperator` avec
+`in_cluster=True`, il n'y a pas de mode local.
 
 ---
 
-## Exécution locale (Docker Compose)
-
-La stack Compose fournit l'UI et le scheduler Airflow, plus deux bases Postgres de test
-(`postgres-db1`, `postgres-db2`) qui servent de source/cible pour les pipelines SQL.
-
-### 1. Créer le fichier `.env`
-
-```bash
-printf 'AIRFLOW_UID=50000\nAIRFLOW_GID=0\n_AIRFLOW_WWW_USER_USERNAME=admin\n_AIRFLOW_WWW_USER_PASSWORD=admin\nFERNET_KEY=\n' > .env
-```
-
-`FERNET_KEY` peut rester vide pour un POC ; sinon générez-la :
-
-```bash
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-```
-
-
 ## Exécution sur Kubernetes
 
-### 1. Construire et pousser l'image du pipeline
+### 1. Construire et pousser les deux images
 
-L'image contient `dags/`, `scripts/`, `entrypoint.py` et les dépendances dlt.
-Le tag doit correspondre à celui référencé par les DAGs et par `values.yaml`.
+**Image d'exécution des pipelines** — `scripts/` + dlt, lancée dans un pod dédié par
+`DltPipelineOperator`. Le tag se passe au DAG via le paramètre `image_tag`.
 
 ```bash
-docker build -t localhost:5000/airflow-custom:1.0.2 -f dockerfile .
+docker build -t localhost:5000/dlt-pipeline:1.0.0 -f dockerfile . && docker push localhost:5000/dlt-pipeline:1.0.0
 ```
 
+**Image Airflow** — `dags/` + `scripts/`, déployée par le chart Helm. Le tag doit
+correspondre à `images.airflow.tag` dans [values.yaml](values.yaml).
+
 ```bash
-docker push localhost:5000/airflow-custom:1.0.0
+docker build -t localhost:5000/airflow-custom:1.1.0 -f airflow.dockerfile . && docker push localhost:5000/airflow-custom:1.1.0
 ```
 
 ### 2. Déployer MinIO
@@ -142,12 +131,26 @@ Créez-y le bucket attendu par le pipeline (`api-minio` avec la config par défa
 
 ### 3. Créer les secrets
 
+**Credentials MinIO**, lus par le pod de pipeline. Les clés doivent porter **exactement**
+le nom des variables d'environnement attendues (voir
+[Secrets](#secrets-et-variables-denvironnement)).
+
 ```bash
 kubectl create secret generic minio-credentials -n airflow --from-literal=MINIO_ENDPOINT=http://minio.airflow.svc.cluster.local:9000 --from-literal=MINIO_ACCESS_KEY=minioadmin --from-literal=MINIO_SECRET_KEY=minioadmin
 ```
 
-Les clés du secret doivent porter **exactement** le nom des variables d'environnement
-attendues (voir [Secrets](#secrets-et-variables-denvironnement)).
+**Connexion Airflow pour les logs distants.** `values.yaml` monte `airflow-s3-conn` dans
+`AIRFLOW_CONN_AWS_DEFAULT` : sans ce secret, les pods Airflow restent bloqués en
+`CreateContainerConfigError`. La valeur est une connexion Airflow sérialisée en JSON.
+
+```bash
+kubectl create secret generic airflow-s3-conn -n airflow --from-literal=connection='{"conn_type":"aws","login":"minioadmin","password":"minioadmin","extra":{"endpoint_url":"http://minio.airflow.svc.cluster.local:9000","region_name":"us-east-1"}}'
+```
+
+Créez aussi le bucket `airflow-logs` dans MinIO, cible de
+`remote_base_log_folder`. Si vous ne voulez pas du logging distant, retirez le bloc
+`config.logging` et `extraEnv` de [values.yaml](values.yaml) et passez
+`logs.persistence.enabled: true`.
 
 ### 4. Installer Airflow via Helm
 
@@ -156,20 +159,29 @@ helm repo add apache-airflow https://airflow.apache.org
 ```
 
 ```bash
-helm upgrade --install airflow apache-airflow/airflow -n airflow -f values.yaml
+helm upgrade --install airflow apache-airflow/airflow -n airflow --version 1.22.0 -f values.yaml
 ```
 
-`values.yaml` configure le `KubernetesExecutor`, l'image custom, et le logging distant
-vers `s3://airflow-logs/` via la connexion `aws_default` (secret `airflow-s3-conn`).
+Le chart 1.22.0 correspond à Airflow 3.2.2, la version de base de l'image custom : épinglez-le
+pour éviter que le chart et l'image divergent.
+
+`values.yaml` configure le `KubernetesExecutor`, l'image custom et le logging distant vers
+`s3://airflow-logs/` via la connexion `aws_default`. Il renseigne `images.pod_template` en
+plus de `images.airflow` : sans cela, le chart génère un pod template sur `apache/airflow`
+standard et les pods de tâche du `KubernetesExecutor` tournent **sans les DAGs**.
 
 ### 5. Lancer un pipeline
 
-Ouvrez l'UI Airflow, dépausez le DAG voulu (`rest_api_to_minio_v2` pour la V2,
-`rest_api_to_minio` pour la V1), puis **Trigger DAG w/ config** et ajustez le JSON
-`pipeline_config` (V2) ou les paramètres individuels (V1).
+```bash
+kubectl port-forward -n airflow svc/airflow-api-server 8080:8080
+```
 
-Le tag d'image par défaut des DAGs est `latest` : renseignez le paramètre `image_tag`
-avec le tag réellement poussé (`1.0.2` ci-dessus) ou taguez aussi l'image en `latest`.
+Sur <http://localhost:8080>, dépausez `rest_api_to_minio_v2`, puis **Trigger DAG w/
+config** et ajustez le JSON `pipeline_config`.
+
+Le paramètre `image_tag` du DAG vaut `latest` par défaut : renseignez-y le tag de
+l'image de pipeline réellement poussée (`1.0.0` ci-dessus) ou taguez aussi l'image en
+`latest`.
 
 ---
 
@@ -220,12 +232,13 @@ Le champ `kind` est un discriminant Pydantic. Sources et destinations déclarée
 Chaque entrée de `resources` est soit un nom de ressource, soit un objet dlt acceptant
 `name`, `endpoint`, `primary_key`, `write_disposition`, `table_format`, `file_format`.
 
-### V1 — paramètres à plat
+### Exécuter un pipeline hors Airflow
 
-Le DAG V1 expose chaque option comme un `Param` Airflow (`base_url`, `resources`,
-`bucket_name`, `dataset_name`, `pipeline_name`, `load_mode`, `default_params`, `layout`,
-`retry_*`, `max_table_nesting`), transmis au pod sous forme de variables `PIPELINE_*`
-lues par [entrypoint.py](entrypoint.py).
+L'image de pipeline se lance seule, ce qui est pratique pour déboguer sans cluster :
+
+```bash
+docker run --rm -e PIPELINE_CONFIG="$(cat ma-config.json)" -e MINIO_ENDPOINT=http://minio:9000 -e MINIO_ACCESS_KEY=minioadmin -e MINIO_SECRET_KEY=minioadmin localhost:5000/dlt-pipeline:1.0.0
+```
 
 ### Ajouter un nouveau pattern d'ingestion
 
@@ -253,12 +266,12 @@ comme variables d'environnement. Le préfixe détermine le secret Kubernetes lu 
 
 Autres variables :
 
-- `PIPELINE_CONFIG` — JSON de configuration (V2), injecté par l'opérateur
-- `PIPELINE_*` — options individuelles (V1), injectées par le DAG
+- `PIPELINE_CONFIG` — JSON de configuration, injecté par l'opérateur
 - `LOG_LEVEL` — niveau de log des scripts (défaut `INFO`)
+- `DLT_DATA_DIR` — état local de dlt, fixé à `/tmp/dlt` dans l'image de pipeline
 
-Côté Compose, `.env` fournit `AIRFLOW_UID`, `AIRFLOW_GID`, les identifiants de l'UI et
-`FERNET_KEY`.
+La configuration d'Airflow lui-même (identifiants de l'UI, Fernet key, connexion à la
+base de métadonnées) est gérée par le chart Helm, pas par ce dépôt.
 
 ---
 
@@ -266,19 +279,25 @@ Côté Compose, `.env` fournit `AIRFLOW_UID`, `AIRFLOW_GID`, les identifiants de
 
 Points à connaître avant de reprendre le projet :
 
-- **Le layout par défaut ne produit pas d'extension de fichier.** `{table_name}` ne
-  contient aucun des placeholders `{load_id}` / `{file_id}` / `{ext}` : dlt écrit donc un
-  objet nommé `<dataset>/pokemon` (sans `.parquet`), réécrit à l'identique à chaque
-  exécution. C'est cohérent avec `write_disposition: "replace"`, mais la plupart des
-  lecteurs et des tables externes s'appuient sur l'extension. Layout par défaut de dlt si
-  vous voulez l'historique et l'extension : `{table_name}/{load_id}.{file_id}.{ext}`.
+- **Le layout par défaut écrase le chargement précédent.** `{table_name}` ne contient
+  ni `{load_id}` ni `{file_id}` : chaque exécution réécrit le même objet
+  `<dataset>/pokemon.parquet`. C'est cohérent avec `write_disposition: "replace"`, mais
+  il n'y a aucun historique des chargements. Layout par défaut de dlt si vous voulez le
+  conserver : `{table_name}/{load_id}.{file_id}.{ext}`.
+- **Les versions de dlt ne sont pas figées** : `requirements-pipeline.txt` demande
+  `dlt~=1.28`, et la version résolue change le nom des fichiers écrits (1.28 produit
+  `pokemon` sans extension, 1.30 produit `pokemon.parquet`). Épinglez une version exacte
+  si le nommage des objets compte pour vos consommateurs en aval.
 - **Toutes les combinaisons du schéma ne sont pas implémentées** : `pipeline_config.py`
   décrit les sources `sql_database` et les destinations `filesystem_azure` / `postgres`,
   mais seul le couple `rest_api` → `filesystem_s3` est codé dans `api_to_minio.py`. Le
   script rejette explicitement les autres combinaisons avec un `ValueError` parlant.
 - **`load_mode: "incremental"`** est accepté par le schéma mais n'a pas d'effet : le
   script journalise un `WARNING` et exécute un chargement complet.
-- Les tags d'image ne sont pas alignés (`values.yaml` → `1.0.2`,
-  `pod_templates/custom_pod.yaml` → `1.0.0`, DAGs → `latest` par défaut). Le `docker push`
-  de la section Kubernetes pousse `1.0.0` alors que le `docker build` construit `1.0.2`.
+- Le paramètre `image_tag` des DAGs vaut `latest` par défaut, alors que les images sont
+  taguées par version : pensez à le renseigner au déclenchement.
+- **[pod_templates/custom_pod.yaml](pod_templates/custom_pod.yaml) n'est branché nulle
+  part** : `values.yaml` ne renseigne pas `podTemplate`, et le pod template est désormais
+  généré par le chart depuis `images.pod_template`. Le fichier est redondant, à supprimer
+  ou à câbler explicitement.
 - Le dépôt ne contient pas de tests.
