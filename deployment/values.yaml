@@ -1,0 +1,62 @@
+executor: "KubernetesExecutor"
+
+images:
+  airflow:
+    repository: apache/airflow
+    tag: "3.2.2"
+    pullPolicy: IfNotPresent
+
+imagePullSecrets:
+  - name: scw-registry-credentials
+
+createUserJob:
+  env:
+    - name: ADMIN_USERNAME
+      valueFrom:
+        secretKeyRef:
+          name: airflow-admin-credentials
+          key: username
+    - name: ADMIN_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: airflow-admin-credentials
+          key: password
+  args:
+    - "bash"
+    - "-c"
+    - |-
+      airflow users create -r Admin -u "$ADMIN_USERNAME" -e admin@example.com -f admin -l user -p "$ADMIN_PASSWORD"
+      airflow users reset-password -u "$ADMIN_USERNAME" --password "$ADMIN_PASSWORD"
+
+config:
+  logging:
+    remote_logging: 'True'
+    remote_base_log_folder: 's3://keolis-data/airflow-logs'
+    remote_log_conn_id: 'aws_default'
+    encrypt_s3_logs: 'False'
+
+extraEnv: |
+  - name: AIRFLOW_CONN_AWS_DEFAULT
+    valueFrom:
+      secretKeyRef:
+        name: airflow-s3-conn
+        key: connection
+
+dags:
+  gitSync:
+    enabled: false
+
+logs:
+  persistence:
+    enabled: false
+
+ingress:
+  apiServer:
+    enabled: true
+    host: "keolis.airflow.davidson-si-nord.fr"
+    ingressClassName: "nginx"
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-production
+    tls:
+      enabled: true
+      secretName: airflow-tls
