@@ -1,0 +1,222 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-db2-data
+  namespace: airflow
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: sbs-default
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-db2
+  namespace: airflow
+  labels:
+    app: postgres-db2
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: postgres-db2
+  template:
+    metadata:
+      labels:
+        app: postgres-db2
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: dst-postgres-credentials
+                  key: DST_POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: dst-postgres-credentials
+                  key: DST_POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: dst-postgres-credentials
+                  key: DST_POSTGRES_DATABASE
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+              subPath: pgdata
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "$(POSTGRES_USER)"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-db2-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-db2
+  namespace: airflow
+spec:
+  selector:
+    app: postgres-db2
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pgadmin-db2-servers
+  namespace: airflow
+data:
+  servers.json: |
+    {
+      "Servers": {
+        "1": {
+          "Name": "db2 (destination)",
+          "Group": "Servers",
+          "Host": "postgres-db2",
+          "Port": 5432,
+          "MaintenanceDB": "ma_base_2",
+          "Username": "user_db2",
+          "SSLMode": "prefer",
+          "PassFile": "/pgpass/pgpass"
+        }
+      }
+    }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pgadmin-db2-data
+  namespace: airflow
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: sbs-default
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pgadmin-db2
+  namespace: airflow
+  labels:
+    app: pgadmin-db2
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: pgadmin-db2
+  template:
+    metadata:
+      labels:
+        app: pgadmin-db2
+    spec:
+      securityContext:
+        fsGroup: 5050
+      containers:
+        - name: pgadmin
+          image: dpage/pgadmin4:latest
+          ports:
+            - containerPort: 80
+          env:
+            - name: PGADMIN_DEFAULT_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: pgadmin-db2-credentials
+                  key: email
+            - name: PGADMIN_DEFAULT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: pgadmin-db2-credentials
+                  key: password
+            - name: PGADMIN_LISTEN_PORT
+              value: "80"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/pgadmin
+            - name: servers
+              mountPath: /pgadmin4/servers.json
+              subPath: servers.json
+            - name: pgpass
+              mountPath: /pgpass
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: pgadmin-db2-data
+        - name: servers
+          configMap:
+            name: pgadmin-db2-servers
+        - name: pgpass
+          secret:
+            secretName: pgadmin-db2-pgpass
+            defaultMode: 0600
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pgadmin-db2
+  namespace: airflow
+spec:
+  selector:
+    app: pgadmin-db2
+  ports:
+    - port: 80
+      targetPort: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pgadmin-db2
+  namespace: airflow
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-production
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: keolis.db2.davidson-si-nord.fr
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: pgadmin-db2
+                port:
+                  number: 80
+  tls:
+    - hosts:
+        - keolis.db2.davidson-si-nord.fr
+      secretName: pgadmin-db2-tls
